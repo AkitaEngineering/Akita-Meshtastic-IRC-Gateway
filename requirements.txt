@@ -1,0 +1,20 @@
+# Core dependencies for the Akita Meshtastic IRC Gateway (AMIG)
+
+irc>=20.0,<21.0
+meshtastic>=2.2.0,<3.0.0
+# pypubsub is required by the meshtastic library for its event handling
+pypubsub>=4.0.0,<5.0.0
+
+# Dependency for external data fetching (Weather, HF Conditions)
+requests>=2.20.0,<3.0.0
+
+# Optional, for building documentation:
+# mkdocs>=1.4.0,<2.0.0
+# mkdocs-material>=9.0.0,<10.0.0
+
+# Optional, for alternative configuration loading:
+# python-dotenv>=0.20.0,<2.0.0
+
+# Optional, if web scraping is needed (e.g., for HF data):
+# beautifulsoup4>=4.10.0,<5.0.0
+# lxml>=4.8.0,<5.0.0
