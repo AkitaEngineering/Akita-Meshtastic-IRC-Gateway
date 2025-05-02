@@ -6,6 +6,14 @@ Command module for handling the 'ALARM' command. Broadcasts an alarm message.
 
 import logging
 
+# Attempt to import meshtastic errors for specific handling
+try:
+    from meshtastic import MeshtasticError, Timeout as MeshtasticTimeout
+except ImportError:
+    # Define dummy exceptions if library not present
+    class MeshtasticError(Exception): pass
+    class MeshtasticTimeout(Exception): pass
+
 COMMAND_NAME = "ALARM"
 COMMAND_HELP = "ALARM <message> - Broadcasts an ALARM message to the default mesh channel"
 
@@ -32,7 +40,15 @@ def execute(server, connection, nick, args):
     try:
         # Send the prefixed message to the default channel
         server.mesh_interface.sendText(full_message, channelIndex=channel_index)
+        connection.notice(nick, f"Alarm message sent to mesh channel {channel_index}.")
+
+    except MeshtasticTimeout:
+        logging.warning(f"Meshtastic timeout sending ALARM for {nick}.")
+        connection.notice(nick, f"Error: Timeout sending ALARM via mesh.")
+    except MeshtasticError as me:
+        logging.error(f"Meshtastic error sending ALARM for {nick}: {me}", exc_info=True)
+        connection.notice(nick, f"Meshtastic Error sending ALARM: {me}")
     except Exception as e:
-        logging.error(f"Failed to send alarm via Meshtastic: {e}", exc_info=True)
-        connection.notice(nick, f"Error sending alarm: {e}")
+        logging.error(f"Unexpected error sending ALARM for {nick}: {e}", exc_info=True)
+        connection.notice(nick, f"Error sending ALARM: {e}")
 
