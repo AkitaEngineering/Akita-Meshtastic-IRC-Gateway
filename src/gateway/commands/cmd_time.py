@@ -23,7 +23,7 @@ def execute(server, connection, nick, args):
     try:
         # Get current local time on the server
         now = datetime.datetime.now()
-        # Format with timezone information if possible (may depend on OS/locale)
+        # Format with timezone information if possible (output depends on OS/locale)
         formatted_time = now.strftime('%Y-%m-%d %H:%M:%S %Z%z')
         connection.notice(nick, f"Server time: {formatted_time}")
     except Exception as e:
