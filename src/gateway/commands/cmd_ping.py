@@ -6,8 +6,17 @@ Command module for handling the 'PING' command. Sends a Meshtastic ping request.
 
 import logging
 
+# Attempt to import meshtastic errors for specific handling
+try:
+    from meshtastic import MeshtasticError, Timeout as MeshtasticTimeout
+except ImportError:
+    # Define dummy exceptions if library not present
+    class MeshtasticError(Exception): pass
+    class MeshtasticTimeout(Exception): pass
+
+
 COMMAND_NAME = "PING"
-COMMAND_HELP = "PING <node_id|shortname> - Sends a Meshtastic ping request to a node"
+COMMAND_HELP = "PING <node_id|shortname|nodenum> - Sends a Meshtastic ping request to a node"
 
 def execute(server, connection, nick, args):
     """
@@ -24,30 +33,36 @@ def execute(server, connection, nick, args):
         return
 
     target_node_spec = args[0]
-    target_node_id = server._find_node_id(target_node_spec) # Use server's helper
+    # Find the node *number* (int)
+    target_node_num = server._find_node_id(target_node_spec)
 
-    if not target_node_id:
+    if target_node_num is None:
          connection.notice(nick, f"Error: Could not find node matching '{target_node_spec}'.")
          return
 
-    connection.notice(nick, f"Sending Meshtastic Ping to {target_node_spec} ({target_node_id})...")
-    try:
-        # Call the sendPing method on the interface
-        # Note: The real API might return immediately; the response (pong)
-        # comes asynchronously via pubsub event handled in server.py.
-        success = server.mesh_interface.sendPing(destinationId=target_node_id)
+    # Use node number for destinationId
+    destination_id = target_node_num
+    connection.notice(nick, f"Sending Meshtastic Ping to {target_node_spec} (NodeNum: {destination_id})...")
 
-        # Provide feedback based on the immediate return value (useful for mock/errors)
-        if success:
-             connection.notice(nick, f"Ping request sent to {target_node_spec}. Waiting for reply...")
-        else:
-             # This might indicate the interface couldn't even attempt to send
-             connection.notice(nick, f"Failed to send ping request (node unknown to interface?).")
+    try:
+        # Call the sendPing method on the interface using the node number
+        # sendPing returns immediately, PONG comes via pubsub
+        server.mesh_interface.sendPing(destinationId=destination_id)
+        connection.notice(nick, f"Ping request sent to {target_node_spec}. Waiting for reply (PONG)...")
+        # Note: Actual PONG confirmation will be displayed when the
+        # corresponding pubsub message is received by server.py's handlers
 
     except AttributeError:
-         logging.error("Meshtastic interface does not support sendPing (might be older version or mock limitation).")
+         # Handle cases where sendPing might not be implemented
+         logging.error("Meshtastic interface does not support sendPing.")
          connection.notice(nick, "Error: This Meshtastic interface does not support the PING command.")
+    except MeshtasticTimeout:
+        logging.warning(f"Meshtastic timeout sending PING to {destination_id} for {nick}.")
+        connection.notice(nick, f"Error: Timeout sending PING to {target_node_spec}.")
+    except MeshtasticError as me:
+        logging.error(f"Meshtastic error sending PING to {destination_id} for {nick}: {me}", exc_info=True)
+        connection.notice(nick, f"Meshtastic Error sending PING: {me}")
     except Exception as e:
-        logging.error(f"Failed to send ping via Meshtastic: {e}", exc_info=True)
-        connection.notice(nick, f"Error sending ping: {e}")
+        logging.error(f"Unexpected error sending PING to {destination_id} for {nick}: {e}", exc_info=True)
+        connection.notice(nick, f"Error sending PING: {e}")
 
