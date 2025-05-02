@@ -5,9 +5,10 @@ Command module for handling the 'INFO' command. Displays detailed info about a n
 """
 
 import logging
+import time # Added for formatting position timestamp
 
 COMMAND_NAME = "INFO"
-COMMAND_HELP = "INFO <node_id|shortname> - Shows detailed info for a node"
+COMMAND_HELP = "INFO <node_id|shortname|nodenum> - Shows detailed info for a node"
 
 def execute(server, connection, nick, args):
     """
@@ -24,19 +25,21 @@ def execute(server, connection, nick, args):
         return
 
     target_node_spec = args[0]
-    target_node_id = server._find_node_id(target_node_spec) # Use server's helper
+    # Find the node *number* first using the helper
+    target_node_num = server._find_node_id(target_node_spec)
 
-    if not target_node_id:
+    if target_node_num is None:
          connection.notice(nick, f"Error: Could not find node matching '{target_node_spec}'.")
          return
 
-    connection.notice(nick, f"--- Info for Node {target_node_spec} ({target_node_id}) ---")
+    # Convert number back to string ID format used as key in nodes dict
+    target_node_id_str = f"!{target_node_num:x}"
+    connection.notice(nick, f"--- Info for Node {target_node_spec} ({target_node_id_str} / {target_node_num}) ---")
+
     try:
-        # Attempt to get node details from the interface
-        # Note: getNode might just return cached data. For fresh data,
-        # the real API might need requestConfig=True or similar,
-        # which could involve delays or specific pubsub responses.
-        node_details = server.mesh_interface.getNode(target_node_id)
+        # Attempt to get node details from the interface using the string ID
+        # Note: This usually returns cached data. Fresh data might require other mechanisms.
+        node_details = server.mesh_interface.nodes.get(target_node_id_str)
 
         if node_details:
             # Iterate through the top-level keys in the node details dictionary
@@ -49,14 +52,24 @@ def execute(server, connection, nick, args):
                            for ukey, uval in value.items(): connection.notice(nick, f"    user.{ukey}: {uval}")
                       elif key == 'position':
                            lat = value.get('latitude', 'N/A'); lon = value.get('longitude', 'N/A'); alt = value.get('altitude', 'N/A')
-                           time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(value.get('time', 0))) if value.get('time') else 'N/A'
+                           # Format position timestamp if available
+                           pos_time_ts = value.get('time')
+                           time_str = time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(pos_time_ts)) if pos_time_ts else 'N/A'
                            connection.notice(nick, f"    position: Lat {lat}, Lon {lon}, Alt {alt}m (Time: {time_str})")
                       elif key == 'deviceMetrics':
+                           # Format device metrics nicely
                            batt = value.get('batteryLevel', 'N/A'); volt = value.get('voltage', 'N/A'); air = value.get('airUtilTx', 'N/A'); uptime = value.get('uptimeSeconds', 'N/A')
-                           connection.notice(nick, f"    metrics: Batt {batt}%, Volt {volt:.2f}V, AirUtil {air:.1f}%, Uptime {uptime}s")
+                           batt_str = f"{batt}%" if isinstance(batt, (int, float)) else 'N/A'
+                           volt_str = f"{volt:.2f}V" if isinstance(volt, (int, float)) else 'N/A'
+                           air_str = f"{air:.1f}%" if isinstance(air, (int, float)) else 'N/A'
+                           uptime_str = f"{uptime}s" if isinstance(uptime, (int, float)) else 'N/A'
+                           connection.notice(nick, f"    metrics: Batt {batt_str}, Volt {volt_str}, AirUtil {air_str}, Uptime {uptime_str}")
                       # Add more specific handlers for other complex dicts if needed
-                      # else:
-                      #      connection.notice(nick, f"    (Dictionary - use specific commands or check logs for full data)")
+                      # e.g., 'loraConfig', 'channelSettings'
+                      else:
+                           # Generic handling for other dictionaries
+                           dict_preview = str(value)[:100] + ('...' if len(str(value)) > 100 else '')
+                           connection.notice(nick, f"    (Dict Data): {dict_preview}")
                  # Handle lists (e.g., channels) by summarizing or printing items
                  elif isinstance(value, list):
                       connection.notice(nick, f"  {key}: (List with {len(value)} items)")
@@ -68,8 +81,12 @@ def execute(server, connection, nick, args):
         else:
             connection.notice(nick, "Could not retrieve details for this node (may be offline or data not available).")
 
+    except AttributeError:
+         logging.error("Could not access 'nodes' property on mesh_interface. Is it connected?")
+         connection.notice(nick, "Error: Could not retrieve node list from Meshtastic interface.")
     except Exception as e:
-        logging.error(f"Error retrieving node info for {target_node_id}: {e}", exc_info=True)
+        logging.error(f"Error retrieving node info for {target_node_id_str}: {e}", exc_info=True)
         connection.notice(nick, f"Error retrieving info: {e}")
     connection.notice(nick, "--- End of Info ---")
+
 
