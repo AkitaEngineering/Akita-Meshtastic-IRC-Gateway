@@ -24,6 +24,10 @@ def execute(server, connection, nick, args):
     try:
         # Get information about the gateway's own node
         my_info = server.mesh_interface.getMyNodeInfo()
+        if not my_info:
+             connection.notice(nick, "Error: Could not retrieve gateway node info.")
+             return
+
         pos = my_info.get('position', {}) # Position data is usually nested
 
         # Extract latitude, longitude, altitude, and time from position data
@@ -41,11 +45,11 @@ def execute(server, connection, nick, args):
                 connection.notice(nick, f"Altitude: {alt} m")
             # Show position timestamp if available
             if pos_time_ts:
+                 # Format timestamp using local timezone settings
                  pos_time_str = time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(pos_time_ts))
                  connection.notice(nick, f"Position Time: {pos_time_str}")
 
             # Provide a link to a map (e.g., Google Maps, OpenStreetMap)
-            # Note: Ensure the URL format is correct for the chosen map provider
             connection.notice(nick, f"Map Link (approx): https://www.google.com/maps?q={lat},{lon}")
             # connection.notice(nick, f"Map Link (OSM): https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=15/{lat}/{lon}")
         else:
@@ -53,6 +57,9 @@ def execute(server, connection, nick, args):
             connection.notice(nick, "Location data not available or incomplete for the gateway node.")
             connection.notice(nick, "(Node needs a GPS fix and position sharing enabled).")
 
+    except AttributeError:
+         logging.error("Could not call getMyNodeInfo on mesh_interface. Is it connected?")
+         connection.notice(nick, "Error: Could not retrieve gateway node info from Meshtastic interface.")
     except Exception as e:
         logging.error(f"Error retrieving location: {e}", exc_info=True)
         connection.notice(nick, f"Error retrieving location: {e}")
