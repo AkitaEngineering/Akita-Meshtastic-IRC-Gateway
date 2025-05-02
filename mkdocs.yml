@@ -1,0 +1,78 @@
+# mkdocs.yml - Configuration for MkDocs documentation site
+
+# Project information
+site_name: Akita Meshtastic IRC Gateway (AMIG) Documentation # Updated Name
+site_url: https://www.akitaengineering.com/meshtastic-irc-gateway/ # Replace with actual URL if hosted
+site_author: Akita Engineering
+site_description: >-
+  Documentation for the Akita Meshtastic IRC Gateway (AMIG), a bridge between
+  IRC and the Meshtastic network.
+
+# Repository information
+repo_url: <your-github-repository-url> # Replace with your repo URL
+repo_name: <your-repo-name> # e.g., meshtastic-irc-gateway
+edit_uri: "" # Optional: Link to edit pages directly on GitHub, e.g., edit/main/docs/
+
+# Copyright
+copyright: Copyright &copy; 2024 Akita Engineering
+
+# Theme Configuration
+theme:
+  name: material # Use the Material for MkDocs theme
+  # logo: assets/logo.png # Optional: Add a logo image to docs/assets/
+  # favicon: assets/favicon.png # Optional: Add a favicon to docs/assets/
+  palette:
+    # Palette toggle for light/dark mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs # Use tabs for top-level sections
+    - navigation.sections # Group pages into sections in the sidebar
+    - toc.integrate # Show table of contents integrated in the sidebar
+    - navigation.top # Add a "back to top" button
+    - search.suggest # Autocompletion in search
+    - search.highlight # Highlight search terms
+    - content.code.annotate # Add annotations to code blocks
+    - content.code.copy # Add copy button to code blocks
+
+# Extensions
+markdown_extensions:
+  - admonition # Nicer call-out blocks (!note, !warning, etc.)
+  - pymdownx.details # Collapsible blocks
+  - pymdownx.highlight: # Code highlighting
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets # Include content from other files
+  - pymdownx.superfences # Nested code/content blocks
+  - toc:
+      permalink: true # Add anchor links to headings
+
+# Navigation structure
+# Define the order and titles of pages in the navigation sidebar/tabs
+nav:
+  - Home: index.md
+  - User Guide:
+    - Installation: usage/installation.md
+    - Running the Gateway: usage/running.md
+    - Connecting: usage/connecting.md
+  - Commands: commands.md
+  # - Development:
+  #   - Contributing: development/contributing.md
+  #   - Architecture: development/architecture.md
+  #   - Adding Commands: development/adding_commands.md # Add this page later
+  - About:
+    - License: license.md # You'll need to create this file too
+    - Contact: about/contact.md # You'll need to create this file too
+
+# Optional Plugins (Install separately if needed)
+# plugins:
+#   - search # Built-in search plugin
+
