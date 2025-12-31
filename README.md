@@ -34,32 +34,6 @@ A simple, modular Python-based gateway that bridges an IRC channel to the Meshta
 
 **Full documentation is available:** Please refer to the `docs/` directory and use MkDocs (`pip install mkdocs mkdocs-material`, then `mkdocs serve`) to view the complete documentation site locally. A hosted version may be available at [Link to Hosted Docs - To be added].
 
-## Project Structure
-
-```plaintext
-meshtastic-irc-gateway/
-├── .gitignore
-├── LICENSE           # Project license file (GPLv3)
-├── README.md         # This file
-├── requirements.txt  # Python dependencies
-├── mkdocs.yml        # Documentation configuration
-├── docs/             # Documentation source files (Markdown)
-│   ├── index.md
-│   ├── commands.md
-│   ├── license.md
-│   └── ...
-└── src/              # Application source code
-    └── gateway/
-        ├── __init__.py
-        ├── config.py   # Configuration settings
-        ├── server.py   # Core IRC server class & Mock Interface
-        ├── main.py     # Entry point, arg parsing, command loading
-        └── commands/   # Directory for command modules
-            ├── __init__.py
-            ├── cmd_send.py
-            └── ...       # Other command files (cmd_*.py)
-```
-
 
 ## Setup
 
