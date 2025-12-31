@@ -11,6 +11,8 @@ import time
 import datetime
 import threading
 import shlex
+from typing import Optional, Dict, Any, Callable, List, Tuple
+from collections.abc import Mapping
 
 import irc.server
 import irc.client
@@ -30,73 +32,96 @@ class MockMeshtasticInterface:
     A placeholder class to simulate Meshtastic interactions.
     Includes mock location and ping. Used if no real interface is configured.
     """
-    def __init__(self):
-        self._nodes_data = {
-            "!MOCKNODE1": {"user": {"id": "!MOCKNODE1", "longName": "Mock Node 1", "shortName": "MK1"}, "lastHeard": int(time.time()) - 60, "snr": 10.0, "position": {}},
-            "!MOCKNODE2": {"user": {"id": "!MOCKNODE2", "longName": "Mock Node 2", "shortName": "MK2"}, "lastHeard": int(time.time()) - 120, "snr": -5.5, "position": {}},
-            "!MYNODEID": {"user": {"id": "!MYNODEID", "longName": "My Gateway Node", "shortName": "GW"}, "lastHeard": int(time.time()), "snr": 0.0, "position": {'latitude': 42.886, 'longitude': -79.249, 'altitude': 180}},
+    def __init__(self) -> None:
+        self._nodes_data: Dict[str, Dict[str, Any]] = {
+            "!MOCKNODE1": {"user": {"id": "!MOCKNODE1", "longName": "Mock Node 1", "shortName": "MK1"}, "lastHeard": int(time.time()) - 60, "snr": 10.0, "position": {}, "num": 1},
+            "!MOCKNODE2": {"user": {"id": "!MOCKNODE2", "longName": "Mock Node 2", "shortName": "MK2"}, "lastHeard": int(time.time()) - 120, "snr": -5.5, "position": {}, "num": 2},
+            "!MYNODEID": {"user": {"id": "!MYNODEID", "longName": "My Gateway Node", "shortName": "GW"}, "lastHeard": int(time.time()), "snr": 0.0, "position": {'latitude': 42.886, 'longitude': -79.249, 'altitude': 180}, "num": 12345678},
         }
-        self._on_receive_callback = None
+        self._on_receive_callback: Optional[Callable[[Dict[str, Any], Any], None]] = None
+        self._lock = threading.Lock()  # Thread safety for node data access
         self.my_node_num = 12345678
         self.my_node_id = "!MYNODEID"
         logging.info("Initialized Mock Meshtastic Interface")
         threading.Thread(target=self._simulate_incoming_messages, daemon=True).start()
         threading.Thread(target=self._simulate_node_updates, daemon=True).start()
 
-    def sendText(self, text, channelIndex=0, destinationId=None, wantAck=False):
+    def sendText(self, text: str, channelIndex: int = 0, destinationId: Optional[str] = None, wantAck: bool = False) -> bool:
         """Simulates sending a text message."""
+        if not text or not isinstance(text, str):
+            logging.warning("[Mock Meshtastic] Invalid text message provided")
+            return False
+        
+        # Sanitize text length (Meshtastic has message length limits)
+        if len(text) > 240:  # Typical Meshtastic message limit
+            logging.warning(f"[Mock Meshtastic] Message truncated from {len(text)} to 240 characters")
+            text = text[:240]
+        
         ack = False
-        if destinationId:
-            logging.info(f"[Mock Meshtastic] Sending DM '{text}' to {destinationId} (wantAck={wantAck})")
-            if wantAck and destinationId in self._nodes_data:
-                 ack = True
-                 logging.info(f"[Mock Meshtastic] Simulating ACK received for DM to {destinationId}")
-        else:
-            logging.info(f"[Mock Meshtastic] Sending to channel {channelIndex}: '{text}'")
+        with self._lock:
+            if destinationId:
+                logging.info(f"[Mock Meshtastic] Sending DM '{text}' to {destinationId} (wantAck={wantAck})")
+                if wantAck and destinationId in self._nodes_data:
+                     ack = True
+                     logging.info(f"[Mock Meshtastic] Simulating ACK received for DM to {destinationId}")
+            else:
+                logging.info(f"[Mock Meshtastic] Sending to channel {channelIndex}: '{text}'")
         # Mock returns simulated ACK status directly
         return ack
 
-    def sendPing(self, destinationId, payload=b'ping'):
+    def sendPing(self, destinationId: str, payload: bytes = b'ping') -> bool:
         """Simulates sending a ping request."""
+        if not destinationId:
+            logging.warning("[Mock Meshtastic] Invalid destination ID for ping")
+            return False
+        
         logging.info(f"[Mock Meshtastic] Sending Ping to {destinationId}")
-        if destinationId in self._nodes_data:
-            logging.info(f"[Mock Meshtastic] Simulating PONG received from {destinationId}")
-            # Simulate receiving a pong packet after a short delay
-            threading.Timer(1.5, self._simulate_pong, args=[destinationId]).start()
-            return True # Simulate success sending ping
-        else:
-            logging.warning(f"[Mock Meshtastic] Cannot send Ping, node {destinationId} unknown.")
-            return False # Simulate failure sending ping
+        with self._lock:
+            if destinationId in self._nodes_data:
+                logging.info(f"[Mock Meshtastic] Simulating PONG received from {destinationId}")
+                # Simulate receiving a pong packet after a short delay
+                threading.Timer(1.5, self._simulate_pong, args=[destinationId]).start()
+                return True # Simulate success sending ping
+            else:
+                logging.warning(f"[Mock Meshtastic] Cannot send Ping, node {destinationId} unknown.")
+                return False # Simulate failure sending ping
 
-    def getMyNodeInfo(self):
+    def getMyNodeInfo(self) -> Dict[str, Any]:
         """Simulates getting local node info."""
-        my_info = self._nodes_data.get(self.my_node_id, {})
-        my_info['myNodeNum'] = self.my_node_num
-        return my_info
+        with self._lock:
+            my_info = self._nodes_data.get(self.my_node_id, {}).copy()
+            my_info['myNodeNum'] = self.my_node_num
+            return my_info
 
-    def getNode(self, nodeId, request_config=False):
+    def getNode(self, nodeId: str, request_config: bool = False) -> Optional[Dict[str, Any]]:
         """Simulates getting info for a specific node."""
-        return self._nodes_data.get(nodeId)
+        with self._lock:
+            node_data = self._nodes_data.get(nodeId)
+            return node_data.copy() if node_data else None
 
     @property
-    def nodes(self):
+    def nodes(self) -> Dict[str, Dict[str, Any]]:
          """Simulates accessing the node database (nodes property)."""
-         return self._nodes_data
+         with self._lock:
+             return self._nodes_data.copy()
 
-    def subscribe_on_receive(self, callback):
+    def subscribe_on_receive(self, callback: Callable[[Dict[str, Any], Any], None]) -> None:
         """Allows the IRC server to register a callback for received messages."""
+        if not callable(callback):
+            raise TypeError("Callback must be callable")
         self._on_receive_callback = callback
         logging.info("[Mock Meshtastic] Registered receive callback.")
 
-    def _simulate_incoming_messages(self):
+    def _simulate_incoming_messages(self) -> None:
         """Internal method to simulate messages arriving from the mesh."""
         msg_counter = 0
         while True:
             time.sleep(45) # Simulate message arrival interval
             msg_counter += 1
             sender_node_id = "!MOCKNODE1"
-            sender_node_info = self.getNode(sender_node_id)
-            sender_name = sender_node_info['user']['shortName'] if sender_node_info else sender_node_id
+            with self._lock:
+                sender_node_info = self._nodes_data.get(sender_node_id)
+            sender_name = sender_node_info.get('user', {}).get('shortName', sender_node_id) if sender_node_info else sender_node_id
             message_text = f"Simulated mesh message #{msg_counter}."
             channel_index = 0
             logging.info(f"[Mock Meshtastic] Simulating incoming: '{message_text}' from {sender_name} ({sender_node_id}) on ch {channel_index}")
@@ -111,20 +136,21 @@ class MockMeshtasticInterface:
                 }
                 try:
                     # Call the registered callback (server's on_meshtastic_receive)
-                    self._on_receive_callback(mock_packet)
+                    self._on_receive_callback(mock_packet, self)
                 except Exception as e:
                     logging.error(f"Error in Meshtastic receive callback: {e}", exc_info=True)
 
-    def _simulate_node_updates(self):
+    def _simulate_node_updates(self) -> None:
         """Simulate nodes appearing/disappearing or updating."""
         time.sleep(60) # Wait a bit before simulating update
         new_node_id = "!NEWNODE3"
         logging.info(f"[Mock Meshtastic] Simulating new node appearing: {new_node_id}")
-        self._nodes_data[new_node_id] = {"user": {"id": new_node_id, "longName": "Newly Seen Node", "shortName": "NEW"}, "lastHeard": int(time.time()), "snr": 5.0, "position": {}}
+        with self._lock:
+            self._nodes_data[new_node_id] = {"user": {"id": new_node_id, "longName": "Newly Seen Node", "shortName": "NEW"}, "lastHeard": int(time.time()), "snr": 5.0, "position": {}, "num": 3}
         # In a real implementation using pubsub, this would trigger a node update event.
         # pub.sendMessage("meshtastic.node.updated", node=self._nodes_data[new_node_id], interface=self)
 
-    def _simulate_pong(self, from_node_id):
+    def _simulate_pong(self, from_node_id: str) -> None:
         """Internal method to simulate receiving a PONG reply."""
         if self._on_receive_callback:
             logging.info(f"[Mock Meshtastic] Simulating PONG packet from {from_node_id}")
@@ -136,7 +162,7 @@ class MockMeshtasticInterface:
                 'rssi': -65, 'snr': 9.0,
             }
             try:
-                self._on_receive_callback(mock_packet)
+                self._on_receive_callback(mock_packet, self)
             except Exception as e:
                 logging.error(f"Error simulating PONG callback: {e}", exc_info=True)
 
@@ -146,7 +172,14 @@ class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
     Minimal IRC Server acting as a command gateway to Meshtastic.
     Uses a command registry for modular command handling.
     """
-    def __init__(self, mesh_interface_ref, control_channel_name, default_mesh_channel_index, *args, **kwargs):
+    def __init__(
+        self,
+        mesh_interface_ref: Any,
+        control_channel_name: str,
+        default_mesh_channel_index: int,
+        *args: Any,
+        **kwargs: Any
+    ) -> None:
         """
         Initializes the IRC server instance.
 
@@ -160,7 +193,7 @@ class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
         self.mesh_interface = mesh_interface_ref
         self.control_channel_name = control_channel_name
         self.default_mesh_channel_index = default_mesh_channel_index
-        self.commands = {} # Command registry: {'CMD_NAME': {'execute': func, 'help': str}}
+        self.commands: Dict[str, Dict[str, Any]] = {} # Command registry: {'CMD_NAME': {'execute': func, 'help': str}}
         logging.info(f"MeshtasticGatewayServer initialized. Control Channel: {self.control_channel_name}")
 
         # Subscribe to Meshtastic messages (PubSub setup moved to main.py for real interface)
@@ -168,16 +201,31 @@ class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
         if hasattr(self.mesh_interface, 'subscribe_on_receive'): # Check if mock interface
              self.mesh_interface.subscribe_on_receive(self.on_meshtastic_receive)
 
-    def register_command(self, command_name, execute_func, help_text):
+    def register_command(self, command_name: str, execute_func: Callable, help_text: str) -> None:
         """Registers a command handler discovered by main.py."""
+        if not command_name or not isinstance(command_name, str):
+            raise ValueError("Command name must be a non-empty string")
+        if not callable(execute_func):
+            raise TypeError("Execute function must be callable")
+        if not help_text or not isinstance(help_text, str):
+            raise ValueError("Help text must be a non-empty string")
+        
         upper_name = command_name.upper()
         if upper_name in self.commands:
             logging.warning(f"Command '{upper_name}' is already registered. Overwriting.")
         self.commands[upper_name] = {'execute': execute_func, 'help': help_text}
         logging.debug(f"Registered command: {upper_name}")
 
-    def _send_server_message_to_control_channel(self, message, prefix="[GW]"):
+    def _send_server_message_to_control_channel(self, message: str, prefix: str = "[GW]") -> None:
         """Helper to send a message FROM THE SERVER to all users in the control channel."""
+        if not message:
+            return
+        
+        # Sanitize message to prevent IRC injection
+        message = message.replace('\r', '').replace('\n', ' ')
+        if len(message) > 400:  # IRC message length limit
+            message = message[:397] + "..."
+        
         full_message = f"{prefix} {message}"
         logging.debug(f"Sending server message to control channel {self.control_channel_name}: {full_message}")
         # Construct the source mask for messages originating from the server itself
@@ -196,13 +244,17 @@ class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
                      # Log errors if sending fails (e.g., client disconnected abruptly)
                      logging.error(f"Error sending message to connection {conn.nickname}: {e}")
 
-    def get_node_name(self, node_id):
+    def get_node_name(self, node_id: str) -> str:
         """Helper to get a display name for a node ID using the mesh interface."""
+        if not node_id:
+            return "UNKNOWN"
+        
         try:
             node_info = self.mesh_interface.getNode(node_id)
             if node_info and node_info.get('user'):
                 # Prefer short name, then long name, then fall back to node ID
-                return node_info['user'].get('shortName') or node_info['user'].get('longName') or node_id
+                user_info = node_info.get('user', {})
+                return user_info.get('shortName') or user_info.get('longName') or node_id
         except Exception as e:
             logging.warning(f"Error getting node info for {node_id}: {e}")
         # Fallback if info retrieval fails or node not found
@@ -305,11 +357,22 @@ class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
             # Send standard IRC error numeric (e.g., 403 No Such Channel)
             connection.error(f"403 {nick} {channel} :Cannot join channel - only {self.control_channel_name} is allowed.")
 
-    def on_privmsg(self, connection, event):
+    def on_privmsg(self, connection: Any, event: Any) -> None:
         """Called by the IRC library when a PRIVMSG is received (channel msg or query)."""
         target = event.target # The channel or nickname the message was sent to
-        message = event.arguments[0] # The actual message text
+        message = event.arguments[0] if event.arguments else "" # The actual message text
         source_nick = connection.nickname # Nickname of the sender
+
+        # Validate and sanitize input
+        if not message or not isinstance(message, str):
+            return
+        
+        # Sanitize message length
+        if len(message) > 512:  # IRC message limit
+            message = message[:512]
+        
+        # Remove control characters that could be used for IRC injection
+        message = ''.join(char for char in message if ord(char) >= 32 or char in '\r\n')
 
         logging.debug(f"IRC PRIVMSG: From={source_nick}, To={target}, Msg={message}")
 
@@ -317,7 +380,7 @@ class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
         if irc.strings.lower(target) == irc.strings.lower(self.control_channel_name):
             is_command = False
             command_word = ""
-            args = []
+            args: List[str] = []
             if message:
                 # Basic check if the first word matches a registered command
                 parts = message.split(None, 1)
@@ -363,14 +426,14 @@ class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
             logging.debug(f"Ignoring PRIVMSG not directed to control channel or server: {target}")
 
     # --- Command Handling Logic ---
-    def _find_node_id(self, node_spec):
+    def _find_node_id(self, node_spec: str) -> Optional[str]:
         """
         Helper method to find a Meshtastic Node ID based on user input.
-        Searches by exact Node ID, Short Name (case-insensitive), or
-        Long Name (case-insensitive).
+        Searches by exact Node ID, Short Name (case-insensitive),
+        Long Name (case-insensitive), or Node Number.
 
         Args:
-            node_spec (str): The user-provided identifier (e.g., "MK1", "!abcdef12", "My Node").
+            node_spec (str): The user-provided identifier (e.g., "MK1", "!abcdef12", "My Node", "12345678").
 
         Returns:
             str: The found Node ID (e.g., "!abcdef12") or None if not found.
@@ -378,6 +441,18 @@ class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
         target_node_id = None
         try:
             nodes = self.mesh_interface.nodes # Access the node list/dict
+            # Try to parse as node number first
+            try:
+                node_num = int(node_spec)
+                # Search by node number
+                for node_id, node_info in nodes.items():
+                    if node_info.get('num') == node_num:
+                        return node_id
+            except ValueError:
+                # Not a number, continue with string matching
+                pass
+            
+            # String-based matching
             for node_id, node_info in nodes.items():
                  # 1. Check for exact Node ID match
                  if node_id == node_spec:
@@ -393,8 +468,12 @@ class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
             logging.error(f"Error accessing node list while finding '{node_spec}': {e}")
         return None # Return None if no match is found or an error occurs
 
-    def handle_control_command(self, connection, nick, command_word, args):
+    def handle_control_command(self, connection: Any, nick: str, command_word: str, args: List[str]) -> None:
         """Looks up and executes a command from the registry."""
+        if not command_word:
+            connection.notice(nick, "Error: Empty command received.")
+            return
+        
         command_info = self.commands.get(command_word)
         if command_info and 'execute' in command_info:
             logging.info(f"Executing command '{command_word}' for {nick} with args: {args}")

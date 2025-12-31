@@ -25,16 +25,17 @@ def execute(server, connection, nick, args):
         return
 
     target_node_spec = args[0]
-    # Find the node *number* first using the helper
-    target_node_num = server._find_node_id(target_node_spec)
+    # Find the node ID using the helper
+    target_node_id_str = server._find_node_id(target_node_spec)
 
-    if target_node_num is None:
+    if target_node_id_str is None:
          connection.notice(nick, f"Error: Could not find node matching '{target_node_spec}'.")
          return
 
-    # Convert number back to string ID format used as key in nodes dict
-    target_node_id_str = f"!{target_node_num:x}"
-    connection.notice(nick, f"--- Info for Node {target_node_spec} ({target_node_id_str} / {target_node_num}) ---")
+    # Get node number for display if available
+    node_info = server.mesh_interface.nodes.get(target_node_id_str, {})
+    node_num = node_info.get('num', 'N/A')
+    connection.notice(nick, f"--- Info for Node {target_node_spec} ({target_node_id_str} / Num: {node_num}) ---")
 
     try:
         # Attempt to get node details from the interface using the string ID

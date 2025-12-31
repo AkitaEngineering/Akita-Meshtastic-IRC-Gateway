@@ -15,6 +15,7 @@ import signal # For graceful shutdown handling
 import os # For command discovery
 import importlib # For dynamic command loading
 import time # For potential delays
+from typing import Optional, Any
 
 # --- Project Imports ---
 try:
@@ -67,7 +68,7 @@ irc_server = None
 
 # --- Functions ---
 
-def setup_logging(log_level):
+def setup_logging(log_level: int) -> None:
     """Configures application-wide logging based on config and args."""
     logging.basicConfig(level=log_level,
                         format=config.LOG_FORMAT,
@@ -79,14 +80,15 @@ def setup_logging(log_level):
         logging.getLogger("meshtastic").setLevel(logging.INFO) # Meshtastic lib can be verbose
 
 
-def initialize_meshtastic_interface(mesh_port_arg, mesh_host_arg):
+def initialize_meshtastic_interface(mesh_port_arg: Optional[str], mesh_host_arg: Optional[str]) -> Any:
     """
     Initializes the real Meshtastic interface based on config and args,
     or falls back to the mock interface. Prioritizes command-line args.
+    Includes retry logic for connection attempts.
 
     Args:
-        mesh_port_arg (str | None): Value from --mesh-port argument.
-        mesh_host_arg (str | None): Value from --mesh-host argument.
+        mesh_port_arg: Value from --mesh-port argument.
+        mesh_host_arg: Value from --mesh-host argument.
 
     Returns:
         An initialized Meshtastic interface instance (real or mock), or None on critical failure.
@@ -103,61 +105,123 @@ def initialize_meshtastic_interface(mesh_port_arg, mesh_host_arg):
         mesh_interface = MockMeshtasticInterface()
         return mesh_interface
 
+    # Connection retry configuration
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2  # seconds between retries
+
     # --- Attempt Real Connection ---
     connected = False
     if mesh_port:
         logging.info(f"Attempting to connect to Meshtastic via Serial: {mesh_port}")
-        try:
-            # Attempt connection, disable node scan initially for faster startup
-            # Increase startup timeout if needed
-            mesh_interface = meshtastic.serial_interface.SerialInterface(mesh_port, noNodes=True, startTimeout=60)
-            # Wait briefly for the interface to establish connection and potentially get initial data
-            logging.debug("Waiting briefly for serial interface initialization...")
-            time.sleep(3) # Adjust if needed
-            if mesh_interface and mesh_interface.myNodeInfo:
-                 logging.info(f"Successfully connected via Serial to {mesh_port}. My Node: {mesh_interface.myNodeInfo.get('user',{}).get('id','?')}")
-                 connected = True
-            else:
-                 logging.warning(f"Connected via Serial to {mesh_port}, but may not have received initial node info yet. Proceeding cautiously.")
-                 # Assume connection is okay for now, rely on pubsub for confirmation
-                 connected = True # Tentatively set true
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                if attempt > 1:
+                    logging.info(f"Retry attempt {attempt}/{MAX_RETRIES} for Serial connection...")
+                    time.sleep(RETRY_DELAY)
+                
+                # Attempt connection, disable node scan initially for faster startup
+                # Increase startup timeout if needed
+                mesh_interface = meshtastic.serial_interface.SerialInterface(mesh_port, noNodes=True, startTimeout=60)
+                # Wait briefly for the interface to establish connection and potentially get initial data
+                logging.debug("Waiting briefly for serial interface initialization...")
+                time.sleep(3) # Adjust if needed
+                if mesh_interface and mesh_interface.myNodeInfo:
+                     logging.info(f"Successfully connected via Serial to {mesh_port}. My Node: {mesh_interface.myNodeInfo.get('user',{}).get('id','?')}")
+                     connected = True
+                     break
+                else:
+                     logging.warning(f"Connected via Serial to {mesh_port}, but may not have received initial node info yet. Proceeding cautiously.")
+                     # Assume connection is okay for now, rely on pubsub for confirmation
+                     connected = True # Tentatively set true
+                     break
 
-        except MeshtasticError as me:
-             logging.error(f"Meshtastic error connecting via Serial {mesh_port}: {me}", exc_info=False) # Less verbose traceback
-        except Exception as e:
-            logging.error(f"Generic error connecting via Serial {mesh_port}: {e}", exc_info=True)
+            except Exception as e:
+                # Check if it's a Meshtastic-specific error (only if library is available)
+                if MESHTASTIC_AVAILABLE:
+                    try:
+                        from meshtastic import MeshtasticError
+                        if isinstance(e, MeshtasticError):
+                            logging.error(f"Meshtastic error connecting via Serial {mesh_port} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=False)
+                        else:
+                            logging.error(f"Generic error connecting via Serial {mesh_port} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
+                    except ImportError:
+                        logging.error(f"Generic error connecting via Serial {mesh_port} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
+                else:
+                    logging.error(f"Generic error connecting via Serial {mesh_port} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
+                
+                # Clean up failed connection attempt
+                # Note: mesh_interface is global, so check it directly, not via locals()
+                if mesh_interface:
+                    try:
+                        mesh_interface.close()
+                    except Exception:
+                        pass
+                    mesh_interface = None
+                
+                if attempt == MAX_RETRIES:
+                    logging.error(f"Failed to connect via Serial after {MAX_RETRIES} attempts.")
 
     elif mesh_host:
         logging.info(f"Attempting to connect to Meshtastic via TCP: {mesh_host}")
-        try:
-            mesh_interface = meshtastic.tcp_interface.TCPInterface(mesh_host, noNodes=True)
-            logging.debug("Waiting briefly for TCP interface initialization...")
-            time.sleep(3) # Allow time for TCP connection and initial sync
-            if mesh_interface and mesh_interface.myNodeInfo:
-                logging.info(f"Successfully connected via TCP to {mesh_host}. My Node: {mesh_interface.myNodeInfo.get('user',{}).get('id','?')}")
-                connected = True
-            else:
-                logging.warning(f"Connected via TCP to {mesh_host}, but may not have received initial node info yet. Proceeding cautiously.")
-                connected = True # Tentatively set true
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                if attempt > 1:
+                    logging.info(f"Retry attempt {attempt}/{MAX_RETRIES} for TCP connection...")
+                    time.sleep(RETRY_DELAY)
+                
+                mesh_interface = meshtastic.tcp_interface.TCPInterface(mesh_host, noNodes=True)
+                logging.debug("Waiting briefly for TCP interface initialization...")
+                time.sleep(3) # Allow time for TCP connection and initial sync
+                if mesh_interface and mesh_interface.myNodeInfo:
+                    logging.info(f"Successfully connected via TCP to {mesh_host}. My Node: {mesh_interface.myNodeInfo.get('user',{}).get('id','?')}")
+                    connected = True
+                    break
+                else:
+                    logging.warning(f"Connected via TCP to {mesh_host}, but may not have received initial node info yet. Proceeding cautiously.")
+                    connected = True # Tentatively set true
+                    break
 
-        except MeshtasticError as me:
-             logging.error(f"Meshtastic error connecting via TCP {mesh_host}: {me}", exc_info=False)
-        except Exception as e:
-            logging.error(f"Generic error connecting via TCP {mesh_host}: {e}", exc_info=True)
+            except Exception as e:
+                # Check if it's a Meshtastic-specific error (only if library is available)
+                if MESHTASTIC_AVAILABLE:
+                    try:
+                        from meshtastic import MeshtasticError
+                        if isinstance(e, MeshtasticError):
+                            logging.error(f"Meshtastic error connecting via TCP {mesh_host} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=False)
+                        else:
+                            logging.error(f"Generic error connecting via TCP {mesh_host} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
+                    except ImportError:
+                        logging.error(f"Generic error connecting via TCP {mesh_host} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
+                else:
+                    logging.error(f"Generic error connecting via TCP {mesh_host} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
+                
+                # Clean up failed connection attempt
+                # Note: mesh_interface is global, so check it directly, not via locals()
+                if mesh_interface:
+                    try:
+                        mesh_interface.close()
+                    except Exception:
+                        pass
+                    mesh_interface = None
+                
+                if attempt == MAX_RETRIES:
+                    logging.error(f"Failed to connect via TCP after {MAX_RETRIES} attempts.")
 
     # --- Fallback to Mock ---
     if not connected:
         logging.warning("Failed to establish real Meshtastic connection. Falling back to Mock Interface.")
+        # Note: mesh_interface is global, so check it directly, not via locals()
         if mesh_interface: # Close partially opened real interface if it exists
              try:
                  mesh_interface.close()
-             except: pass # Ignore errors during close on fallback
+             except Exception:
+                 pass # Ignore errors during close on fallback
         mesh_interface = MockMeshtasticInterface()
 
     return mesh_interface
 
 
-def setup_pubsub_listeners(server_instance):
+def setup_pubsub_listeners(server_instance: Any) -> None:
     """
     Sets up PyPubSub listeners for Meshtastic events if using the real interface.
     Connects Meshtastic events (like receiving messages) to methods on the
@@ -193,7 +257,7 @@ def setup_pubsub_listeners(server_instance):
 
 # --- PubSub Event Handlers (for real interface) ---
 
-def on_mesh_connection_handler(status=None, interface=None, **kwargs):
+def on_mesh_connection_handler(status: Optional[str] = None, interface: Any = None, **kwargs: Any) -> None:
     """Handles Meshtastic connection status updates reported via pubsub."""
     # Extract status message robustly
     status_message = "Unknown connection status change"
@@ -209,7 +273,7 @@ def on_mesh_connection_handler(status=None, interface=None, **kwargs):
     if irc_server and hasattr(irc_server, '_send_server_message_to_control_channel'):
          irc_server._send_server_message_to_control_channel(f"Mesh Status: {status_message}", "[MESH]")
 
-def on_node_update_handler(node=None, interface=None):
+def on_node_update_handler(node: Optional[dict] = None, interface: Any = None) -> None:
     """Handles node list updates reported via pubsub."""
     if node:
         try:
@@ -232,7 +296,7 @@ def on_node_update_handler(node=None, interface=None):
         logging.warning("Received node update event with no node data.")
 
 
-def load_and_register_commands(server_instance):
+def load_and_register_commands(server_instance: Any) -> None:
     """
     Dynamically discovers and loads command modules from the 'commands' directory
     and registers them with the provided IRC server instance.
@@ -279,7 +343,7 @@ def load_and_register_commands(server_instance):
                 logging.error(f"Error loading or registering command from {module_name}: {e}", exc_info=True)
 
 
-def shutdown_handler(signum, frame):
+def shutdown_handler(signum: int, frame: Any) -> None:
     """Graceful shutdown handler for SIGINT (Ctrl+C) and SIGTERM."""
     logging.warning(f"Received signal {signum}. Initiating graceful shutdown...")
 
@@ -300,6 +364,13 @@ def shutdown_handler(signum, frame):
                  mesh_interface.close()
              except Exception as e:
                  logging.error(f"Error closing Meshtastic interface: {e}")
+        # Unsubscribe from pubsub if available
+        if pub and hasattr(pub, 'unsubscribeAll'):
+            try:
+                pub.unsubscribeAll()
+                logging.debug("Unsubscribed from all pubsub topics")
+            except Exception as e:
+                logging.warning(f"Error unsubscribing from pubsub: {e}")
 
     # 3. Exit the application
     logging.info("Shutdown complete.")

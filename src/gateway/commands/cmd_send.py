@@ -32,6 +32,16 @@ def execute(server, connection, nick, args):
         return
 
     text_to_send = " ".join(args)
+    
+    # Validate message length (Meshtastic has limits)
+    if len(text_to_send) > 240:
+        connection.notice(nick, f"Error: Message too long ({len(text_to_send)} chars). Maximum is 240 characters.")
+        return
+    
+    if not text_to_send.strip():
+        connection.notice(nick, "Error: Message cannot be empty.")
+        return
+    
     channel_index = server.default_mesh_channel_index
     connection.notice(nick, f"Sending '{text_to_send}' to mesh channel {channel_index}...")
     try:

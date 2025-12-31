@@ -33,16 +33,16 @@ def execute(server, connection, nick, args):
         return
 
     target_node_spec = args[0]
-    # Find the node *number* (int)
-    target_node_num = server._find_node_id(target_node_spec)
+    # Find the node ID (string)
+    target_node_id = server._find_node_id(target_node_spec)
 
-    if target_node_num is None:
+    if target_node_id is None:
          connection.notice(nick, f"Error: Could not find node matching '{target_node_spec}'.")
          return
 
-    # Use node number for destinationId
-    destination_id = target_node_num
-    connection.notice(nick, f"Sending Meshtastic Ping to {target_node_spec} (NodeNum: {destination_id})...")
+    # Use node ID for destinationId (Meshtastic API accepts both ID strings and node numbers)
+    destination_id = target_node_id
+    connection.notice(nick, f"Sending Meshtastic Ping to {target_node_spec} ({destination_id})...")
 
     try:
         # Call the sendPing method on the interface using the node number

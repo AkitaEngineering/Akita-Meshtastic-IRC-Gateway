@@ -33,17 +33,26 @@ def execute(server, connection, nick, args):
 
     target_node_spec = args[0]
     text_to_send = " ".join(args[1:])
+    
+    # Validate message length
+    if len(text_to_send) > 240:
+        connection.notice(nick, f"Error: Message too long ({len(text_to_send)} chars). Maximum is 240 characters.")
+        return
+    
+    if not text_to_send.strip():
+        connection.notice(nick, "Error: Message cannot be empty.")
+        return
 
-    # Use the server's helper method to find the node *number* (int)
-    target_node_num = server._find_node_id(target_node_spec)
+    # Use the server's helper method to find the node ID (string)
+    target_node_id = server._find_node_id(target_node_spec)
 
-    if target_node_num is None: # Check if None was returned
+    if target_node_id is None: # Check if None was returned
          connection.notice(nick, f"Error: Could not find node matching '{target_node_spec}'. Use NODES command.")
          return
 
-    # Use node number for destinationId
-    destination_id = target_node_num
-    connection.notice(nick, f"Sending DM '{text_to_send}' to {target_node_spec} (NodeNum: {destination_id})...")
+    # Use node ID for destinationId (Meshtastic API accepts both ID strings and node numbers)
+    destination_id = target_node_id
+    connection.notice(nick, f"Sending DM '{text_to_send}' to {target_node_spec} ({destination_id})...")
 
     try:
         # Request ACK for Direct Messages

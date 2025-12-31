@@ -32,6 +32,16 @@ def execute(server, connection, nick, args):
         return
 
     alarm_text = " ".join(args)
+    
+    # Validate message length (leave room for "ALARM: " prefix)
+    if len(alarm_text) > 230:
+        connection.notice(nick, f"Error: Alarm message too long ({len(alarm_text)} chars). Maximum is 230 characters.")
+        return
+    
+    if not alarm_text.strip():
+        connection.notice(nick, "Error: Alarm message cannot be empty.")
+        return
+    
     # Prepend "ALARM:" to the message for easy identification on the mesh
     full_message = f"ALARM: {alarm_text}"
     channel_index = server.default_mesh_channel_index
