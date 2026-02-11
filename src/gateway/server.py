@@ -167,7 +167,7 @@ class MockMeshtasticInterface:
                 logging.error(f"Error simulating PONG callback: {e}", exc_info=True)
 
 # --- IRC Gateway Server Class ---
-class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
+class MeshtasticGatewayServer(irc.server.IRCServer):
     """
     Minimal IRC Server acting as a command gateway to Meshtastic.
     Uses a command registry for modular command handling.
@@ -187,7 +187,7 @@ class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
             mesh_interface_ref: An initialized Meshtastic interface instance (real or mock).
             control_channel_name (str): The name of the IRC channel for commands.
             default_mesh_channel_index (int): The default Meshtastic channel index.
-            *args, **kwargs: Arguments passed to the base SimpleIRCServer.
+            *args, **kwargs: Arguments passed to the base IRCServer.
         """
         super().__init__(*args, **kwargs)
         self.mesh_interface = mesh_interface_ref
@@ -341,7 +341,7 @@ class MeshtasticGatewayServer(irc.server.SimpleIRCServer):
         if irc.strings.lower(channel) == irc.strings.lower(self.control_channel_name):
             logging.info(f"{nick} joined control channel {channel}")
             # Manually construct and send the JOIN message back to the client
-            # (SimpleIRCServer doesn't handle this automatically)
+            # (IRCServer doesn't handle this automatically)
             source = f"{nick}!{connection.user}@{connection.host}"
             connection.send_line(f":{source} JOIN :{channel}")
             # Send channel topic (RPL_TOPIC 332)

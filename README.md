@@ -40,8 +40,8 @@ A simple, modular Python-based gateway that bridges an IRC channel to the Meshta
 ### Clone the Repository
 
 ```sh
-git clone <https://github.com/akitaengineering/akita-meshtastic-ird-gateway/> # Replace with the actual URL
-cd meshtastic-irc-gateway       # Or your chosen directory name
+git clone https://github.com/AkitaEngineering/Akita-Meshtastic-IRC-Gateway.git
+cd Akita-Meshtastic-IRC-Gateway
 ```
 
 ### Create Virtual Environment (Recommended)
