@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "akita-meshtastic-irc-gateway"
+version = "1.0.0"
+description = "A production-oriented IRC gateway for Meshtastic networks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-only"
+authors = [{name = "Akita Engineering", email = "info@akitaengineering.com"}]
+dependencies = [
+  "irc>=20.5,<21",
+  "meshtastic>=2.7.11,<3",
+  "pypubsub>=4.0.7,<5",
+  "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+dev = ["build>=1.2,<2", "pytest>=8,<10", "ruff>=0.9,<1"]
+docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.6,<10"]
+
+[project.scripts]
+amig = "gateway.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501", "RUF100"]

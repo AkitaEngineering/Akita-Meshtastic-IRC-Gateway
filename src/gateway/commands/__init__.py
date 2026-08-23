@@ -16,7 +16,3 @@ Each command module should define:
     - nick: The nickname of the user issuing the command.
     - args: A list of strings representing the arguments provided after the command name.
 """
-
-# This file can remain empty. Its presence signifies that the directory
-# 'commands' should be treated as a package.
-

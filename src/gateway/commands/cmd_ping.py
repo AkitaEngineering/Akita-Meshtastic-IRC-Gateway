@@ -1,68 +1,37 @@
-# src/gateway/commands/cmd_ping.py
+"""PING command using Meshtastic's REPLY_APP echo service."""
 
-"""
-Command module for handling the 'PING' command. Sends a Meshtastic ping request.
-"""
-
-import logging
-
-# Attempt to import meshtastic errors for specific handling
-try:
-    from meshtastic import MeshtasticError, Timeout as MeshtasticTimeout
-except ImportError:
-    # Define dummy exceptions if library not present
-    class MeshtasticError(Exception): pass
-    class MeshtasticTimeout(Exception): pass
-
+import time
+from collections.abc import Mapping
 
 COMMAND_NAME = "PING"
-COMMAND_HELP = "PING <node_id|shortname|nodenum> - Sends a Meshtastic ping request to a node"
+COMMAND_HELP = "PING <node_id|shortname|nodenum> - Requests an echo reply from a node"
+
 
 def execute(server, connection, nick, args):
-    """
-    Executes the PING command.
-
-    Args:
-        server: The MeshtasticGatewayServer instance.
-        connection: The IRC connection object for the client.
-        nick: The nickname of the user issuing the command.
-        args: A list containing the node specifier.
-    """
-    if not args:
+    if len(args) != 1:
         connection.notice(nick, f"Usage: {COMMAND_HELP}")
         return
+    target_spec = args[0]
+    destination_id = server._find_node_id(target_spec)
+    if destination_id is None:
+        connection.notice(nick, f"Node '{target_spec}' was not found. Use NODES to list known nodes.")
+        return
+    started = time.monotonic()
 
-    target_node_spec = args[0]
-    # Find the node ID (string)
-    target_node_id = server._find_node_id(target_node_spec)
+    def on_response(packet):
+        if not connection.connected:
+            return
+        decoded = packet.get("decoded", {}) if isinstance(packet, Mapping) else {}
+        portnum = decoded.get("portnum") if isinstance(decoded, Mapping) else None
+        elapsed_ms = (time.monotonic() - started) * 1000
+        if portnum == "REPLY_APP":
+            connection.notice(nick, f"PONG from {target_spec} in {elapsed_ms:.0f} ms.")
+            return
+        routing = decoded.get("routing", {}) if isinstance(decoded, Mapping) else {}
+        reason = routing.get("errorReason", "NO_RESPONSE") if isinstance(routing, Mapping) else "NO_RESPONSE"
+        connection.notice(nick, f"Ping to {target_spec} failed: {reason}.")
 
-    if target_node_id is None:
-         connection.notice(nick, f"Error: Could not find node matching '{target_node_spec}'.")
-         return
-
-    # Use node ID for destinationId (Meshtastic API accepts both ID strings and node numbers)
-    destination_id = target_node_id
-    connection.notice(nick, f"Sending Meshtastic Ping to {target_node_spec} ({destination_id})...")
-
-    try:
-        # Call the sendPing method on the interface using the node number
-        # sendPing returns immediately, PONG comes via pubsub
-        server.mesh_interface.sendPing(destinationId=destination_id)
-        connection.notice(nick, f"Ping request sent to {target_node_spec}. Waiting for reply (PONG)...")
-        # Note: Actual PONG confirmation will be displayed when the
-        # corresponding pubsub message is received by server.py's handlers
-
-    except AttributeError:
-         # Handle cases where sendPing might not be implemented
-         logging.error("Meshtastic interface does not support sendPing.")
-         connection.notice(nick, "Error: This Meshtastic interface does not support the PING command.")
-    except MeshtasticTimeout:
-        logging.warning(f"Meshtastic timeout sending PING to {destination_id} for {nick}.")
-        connection.notice(nick, f"Error: Timeout sending PING to {target_node_spec}.")
-    except MeshtasticError as me:
-        logging.error(f"Meshtastic error sending PING to {destination_id} for {nick}: {me}", exc_info=True)
-        connection.notice(nick, f"Meshtastic Error sending PING: {me}")
-    except Exception as e:
-        logging.error(f"Unexpected error sending PING to {destination_id} for {nick}: {e}", exc_info=True)
-        connection.notice(nick, f"Error sending PING: {e}")
-
+    packet = server.send_mesh_ping(destination_id, on_response)
+    packet_id = server.packet_id(packet)
+    suffix = f" (packet {packet_id})" if packet_id is not None else ""
+    connection.notice(nick, f"Ping queued for {target_spec}{suffix}.")

@@ -1,159 +1,119 @@
 # Akita Meshtastic IRC Gateway (AMIG)
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+AMIG exposes one authenticated IRC control channel for a Meshtastic radio. It relays mesh broadcasts and direct messages to joined IRC users and provides commands for sending text, alerts, direct messages, echo requests, node information, weather, and NOAA space-weather conditions.
 
-**Organization:** Akita Engineering  
-**Website:** [www.akitaengineering.com](https://www.akitaengineering.com)  
-**Contact:** info@akitaengineering.com  
+## Production safeguards
 
-A simple, modular Python-based gateway that bridges an IRC channel to the Meshtastic network, allowing users to send commands and messages to the mesh via an IRC client.
+- Real radio mode is fail-closed: connection failures stop startup instead of silently switching to test data.
+- Mock mode must be explicitly selected with `--mock`.
+- The default listener is loopback-only.
+- A non-loopback listener requires TLS and `AMIG_IRC_PASSWORD` unless the operator deliberately supplies `--allow-insecure-irc`.
+- IRC input is bounded and sanitized, clients only receive mesh traffic after joining the control channel, and mesh transmissions are rate-limited.
+- Dependencies have tested lower bounds and bounded major versions.
+- Startup fails if a command module or configuration value is invalid.
 
-## Features
+TLS protects the IRC password and mesh content in transit. Do not expose plain IRC directly to the internet. Radio operation remains subject to local regulations and the security of the configured Meshtastic channels.
 
-- Connect using a standard IRC client.
-- Join a designated control channel (`#meshtastic-ctrl` by default).
-- **Modular command system:** Easily add new commands by creating Python modules.
-- Send messages to the Meshtastic default channel (`SEND <message>`).
-- Send Direct Messages to specific Meshtastic nodes (`DM <node_id|shortname|nodenum> <message>`).
-- List known nodes on the mesh (`NODES`).
-- Get basic info about a specific node (`INFO <node>`).
-- View gateway node's GPS location (`LOCATION`).
-- Broadcast an ALARM message (`ALARM <message>`).
-- Send a Meshtastic ping (`PING <node>`).
-- Get server time (`TIME`).
-- Get basic mesh stats (`STATS`).
-- Get weather forecast via OpenWeatherMap (`WEATHER` - requires config).
-- Get HF propagation conditions via NOAA SWPC (`HFCONDITIONS`).
-- Relays standard chat messages between IRC users in the control channel.
-- Relays received Meshtastic messages (broadcasts and DMs to the gateway node) back to the IRC channel.
-- Relays ACK/NAK/PONG feedback to the IRC channel.
+## Install
 
-**Disclaimer:** This project provides a functional base but should be considered experimental. Real-world testing, robust error handling, and security hardening are ongoing considerations. Use with caution and ensure compliance with all applicable regulations.
+AMIG requires Python 3.10 or newer.
 
-## Documentation
-
-**Full documentation is available:** Please refer to the `docs/` directory and use MkDocs (`pip install mkdocs mkdocs-material`, then `mkdocs serve`) to view the complete documentation site locally. A hosted version may be available at [Link to Hosted Docs - To be added].
-
-
-## Setup
-
-### Clone the Repository
-
-```sh
+```bash
 git clone https://github.com/AkitaEngineering/Akita-Meshtastic-IRC-Gateway.git
 cd Akita-Meshtastic-IRC-Gateway
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install .
 ```
 
-### Create Virtual Environment (Recommended)
+For development and tests:
 
-```sh
-python -m venv venv
+```bash
+python -m pip install '.[dev]'
+pytest
+ruff check src tests
+ruff format --check src tests
 ```
 
-#### Activate the Environment
+## Configure a radio
 
-- **Linux/macOS**:
-  ```sh
-  source venv/bin/activate
-  ```
-- **Windows**:
-  ```sh
-  venv\Scripts\activate
-  ```
+Choose exactly one connection:
 
-### Install Dependencies
-
-```sh
-pip install -r requirements.txt
+```bash
+export AMIG_MESH_DEVICE_PORT=/dev/ttyACM0
+# or:
+export AMIG_MESH_DEVICE_HOST=192.168.1.100
 ```
 
----
+Important environment variables:
 
-## Configuration
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AMIG_IRC_HOST` | `127.0.0.1` | IRC bind address |
+| `AMIG_IRC_PORT` | `6667` | IRC listen port |
+| `AMIG_IRC_SERVER_NAME` | `amig.gw` | IRC server name |
+| `AMIG_CONTROL_CHANNEL` | `#meshtastic-ctrl` | Sole control channel |
+| `AMIG_IRC_PASSWORD` | unset | IRC server password |
+| `AMIG_TLS_CERTFILE` / `AMIG_TLS_KEYFILE` | unset | PEM certificate chain and private key |
+| `AMIG_IRC_MAX_CLIENTS` | `100` | Maximum simultaneous client sockets |
+| `AMIG_IRC_REGISTRATION_TIMEOUT` | `30` | Seconds allowed to complete PASS/NICK/USER |
+| `AMIG_MESH_CHANNEL` | `0` | Meshtastic channel index, 0–7 |
+| `AMIG_MESH_CONNECT_TIMEOUT` | `60` | Radio connection timeout in seconds |
+| `AMIG_MESH_CONNECT_RETRIES` | `3` | Startup connection attempts |
+| `AMIG_MESH_SEND_INTERVAL` | `1.0` | Minimum seconds between mesh transmissions |
+| `AMIG_MESH_RESPONSE_TIMEOUT` | `30` | Seconds before a pending DM or ping reports timeout |
+| `AMIG_LOG_LEVEL` | `INFO` | Python logging level |
+| `WEATHER_API_KEY` | unset | OpenWeatherMap API key |
+| `WEATHER_LOCATION` | `Port Colborne,CA` | OpenWeatherMap query |
+| `WEATHER_UNITS` | `metric` | `metric`, `imperial`, or `standard` |
 
-Edit `src/gateway/config.py`:
+## Run
 
-- Set one of the following based on your connection type:
-  - `MESH_DEVICE_PORT` (e.g., `/dev/ttyUSB0`, `COM3`)
-  - `MESH_DEVICE_HOST` (e.g., `192.168.1.100`)
-  - Leave the unused one as `None`.
+After installing the package:
 
-- Weather Command Support:
-  - Add your OpenWeatherMap API key to `WEATHER_API_KEY` or set the `WEATHER_API_KEY` environment variable.
-  - Ensure `WEATHER_LOCATION` is set correctly.
-
-- Review and adjust other settings:
-  - `IRC_SERVER_PORT`
-  - `CONTROL_CHANNEL`
-  - And any other options as needed.
-
----
-
-## Running the Gateway
-
-From the project root:
-
-```sh
-python src/gateway/main.py [options]
+```bash
+amig
 ```
 
-### Common Options (Override `config.py`)
+For a local smoke test without a radio:
 
-```sh
---mesh-port /dev/ttyACM0  # Use a specific serial port.
---mesh-host <ip_address>  # Use a specific TCP/IP host.
--p <port_num>             # Run IRC server on a different port.
--v                        # Enable verbose (debug) logging.
+```bash
+amig --mock
 ```
 
-See all options:
-```sh
-python src/gateway/main.py --help
+To listen beyond localhost, configure a certificate and password before changing the bind address:
+
+```bash
+export AMIG_IRC_PASSWORD='use-a-long-random-secret'
+export AMIG_TLS_CERTFILE=/etc/amig/fullchain.pem
+export AMIG_TLS_KEYFILE=/etc/amig/privkey.pem
+amig --host 0.0.0.0
 ```
 
----
+Connect an IRC client, enable TLS when configured, provide the server password, and join `#meshtastic-ctrl`. Type `HELP` for the command list.
 
-## Connecting with an IRC Client
+## Commands
 
-1. Connect your IRC client to the gateway host/IP and port (e.g., `localhost:6667`).
-2. Disable SSL/TLS.
-3. Join the control channel:
-   ```
-   /join #meshtastic-ctrl
-   ```
-   *(Or your configured channel.)*
-4. Type `HELP` to list available commands.
+- `SEND <message>` — broadcast a text message.
+- `DM <node> <message>` — send a reliable direct message and report ACK/NAK.
+- `ALARM <message>` — send a high-priority Meshtastic alert packet.
+- `PING <node>` — use Meshtastic `REPLY_APP` to request an echo.
+- `NODES`, `INFO <node>`, `LOCATION`, `STATS`, `TIME` — inspect gateway state.
+- `WEATHER` — query OpenWeatherMap when configured.
+- `HFCONDITIONS` — query current NOAA SWPC Kp, solar flux, and scale products.
 
----
+Node arguments accept a node ID, number, exact short name, or exact long name. Quote names containing spaces.
 
-## Adding New Commands
+More detail is available in [the documentation](docs/index.md).
 
-To extend functionality:
+## Service operation
 
-1. Create a new file in `src/gateway/commands/`, e.g. `cmd_yourcommand.py`
-2. Define the following in the file:
-   - `COMMAND_NAME`
-   - `COMMAND_HELP`
-   - `execute(server, connection, nick, args)`
+Run AMIG under a supervisor such as systemd with automatic restart, a dedicated unprivileged account, restricted access to the serial device or TCP radio, and logs captured by the service manager. Keep TLS private-key permissions limited to that account. Validate the deployment with `amig --mock` locally before attaching a radio.
 
-The gateway auto-loads new command files on startup.
+## License and contact
 
----
+Copyright Akita Engineering. Licensed under GPL-3.0-only; see [LICENSE](LICENSE).
 
-## Contributing
-
-Contributions, issues, and feature requests are welcome.
-
-To contribute:
-
-- Fork the repository
-- Create a branch
-- Make your changes
-- Submit a pull request
-
----
-
-## License
-
-Distributed under the GNU General Public License v3.0. See `LICENSE` for more information.
-
+- Website: https://www.akitaengineering.com
+- Email: info@akitaengineering.com
+- Issues: https://github.com/AkitaEngineering/Akita-Meshtastic-IRC-Gateway/issues

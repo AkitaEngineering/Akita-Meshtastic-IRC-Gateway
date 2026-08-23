@@ -1,486 +1,288 @@
-# src/gateway/main.py
+"""Command-line entry point for the Akita Meshtastic IRC Gateway."""
 
-"""
-Main entry point for the Akita Meshtastic IRC Gateway (AMIG).
+from __future__ import annotations
 
-Handles argument parsing (overriding config), initializes the Meshtastic interface
-(real or mock), sets up logging, dynamically loads commands, creates the IRC
-server instance, and starts the server loop.
-"""
-
-import sys
-import logging
 import argparse
-import signal # For graceful shutdown handling
-import os # For command discovery
-import importlib # For dynamic command loading
-import time # For potential delays
-from typing import Optional, Any
+import importlib
+import ipaddress
+import logging
+import pkgutil
+import signal
+import ssl
+import time
+from typing import Any
 
-# --- Project Imports ---
+from gateway import config
+from gateway.server import MeshtasticGatewayServer, MockMeshtasticInterface
+
 try:
-    # Import necessary classes and constants from server.py
-    from gateway.server import (
-        MeshtasticGatewayServer, MockMeshtasticInterface
-    )
-    # Import configuration settings
-    import gateway.config as config
-    # Import the commands package to find its path
-    import gateway.commands
-except ImportError as e:
-    # Provide helpful error message if imports fail
-    print(f"Import Error: {e}", file=sys.stderr)
-    print("Ensure you are running this script from the project root directory", file=sys.stderr)
-    print("e.g., using 'python src/gateway/main.py'", file=sys.stderr)
-    print("Or ensure the 'src' directory is in your PYTHONPATH.", file=sys.stderr)
-    sys.exit(1)
-
-
-# --- Meshtastic Library Imports (Conditional) ---
-# Try to import the real Meshtastic library; fall back gracefully if not installed.
-try:
-    import meshtastic
     import meshtastic.serial_interface
     import meshtastic.tcp_interface
-    from meshtastic.util import Timeout as MeshtasticTimeout # Import Timeout exception
-    # Disable slow protobuf warning which is common but usually harmless
-    os.environ['PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION'] = 'python'
-    from pubsub import pub # Required by meshtastic for event handling
-    MESHTASTIC_AVAILABLE = True
-except ImportError:
-    # Log a warning if the library isn't found
-    logging.warning("meshtastic library not found. Real interface disabled. Will use Mock.")
-    MESHTASTIC_AVAILABLE = False
-    # Define dummy classes/objects to prevent NameErrors later if the library is missing
-    class MeshtasticObject: pass
-    class MeshtasticTimeout(Exception): pass # Define dummy Timeout exception
-    class MeshtasticError(Exception): pass # Define dummy MeshtasticError
-    meshtastic = MeshtasticObject()
-    meshtastic.serial_interface = MeshtasticObject()
-    meshtastic.tcp_interface = MeshtasticObject()
-    pub = None # pubsub won't be available either
+    from pubsub import pub
+except ImportError as exc:
+    MESHTASTIC_IMPORT_ERROR: ImportError | None = exc
+    pub = None
+else:
+    MESHTASTIC_IMPORT_ERROR = None
 
-
-# --- Global Variables ---
-# These hold instances needed across functions, particularly for shutdown
-mesh_interface = None
-irc_server = None
-
-# --- Functions ---
 
 def setup_logging(log_level: int) -> None:
-    """Configures application-wide logging based on config and args."""
-    logging.basicConfig(level=log_level,
-                        format=config.LOG_FORMAT,
-                        datefmt=config.LOG_DATE_FORMAT)
-    # Reduce verbosity of noisy libraries if desired (especially in INFO mode)
+    logging.basicConfig(
+        level=log_level,
+        format=config.LOG_FORMAT,
+        datefmt=config.LOG_DATE_FORMAT,
+        force=True,
+    )
     if log_level > logging.DEBUG:
-        logging.getLogger("irc").setLevel(logging.WARNING)
-        logging.getLogger("pubsub").setLevel(logging.INFO)
-        logging.getLogger("meshtastic").setLevel(logging.INFO) # Meshtastic lib can be verbose
+        for logger_name in ("irc", "pubsub", "meshtastic"):
+            logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
-def initialize_meshtastic_interface(mesh_port_arg: Optional[str], mesh_host_arg: Optional[str]) -> Any:
-    """
-    Initializes the real Meshtastic interface based on config and args,
-    or falls back to the mock interface. Prioritizes command-line args.
-    Includes retry logic for connection attempts.
+def initialize_meshtastic_interface(
+    mesh_port: str | None,
+    mesh_host: str | None,
+    use_mock: bool,
+) -> Any:
+    """Create an explicit test interface or connect to a configured radio."""
+    if use_mock:
+        return MockMeshtasticInterface()
+    if not mesh_port and not mesh_host:
+        raise RuntimeError("configure --mesh-port or --mesh-host, or use --mock explicitly")
+    if MESHTASTIC_IMPORT_ERROR:
+        raise RuntimeError(f"Meshtastic dependency is unavailable: {MESHTASTIC_IMPORT_ERROR}")
 
-    Args:
-        mesh_port_arg: Value from --mesh-port argument.
-        mesh_host_arg: Value from --mesh-host argument.
-
-    Returns:
-        An initialized Meshtastic interface instance (real or mock), or None on critical failure.
-    """
-    global mesh_interface # Allow modification of the global variable
-
-    # Determine connection method: prioritize command line args, then config file
-    mesh_port = mesh_port_arg if mesh_port_arg else config.MESH_DEVICE_PORT
-    mesh_host = mesh_host_arg if mesh_host_arg else config.MESH_DEVICE_HOST
-
-    # If the real library isn't installed, force mock
-    if not MESHTASTIC_AVAILABLE:
-        logging.warning("Meshtastic library not found, using Mock Interface.")
-        mesh_interface = MockMeshtasticInterface()
-        return mesh_interface
-
-    # Connection retry configuration
-    MAX_RETRIES = 3
-    RETRY_DELAY = 2  # seconds between retries
-
-    # --- Attempt Real Connection ---
-    connected = False
-    if mesh_port:
-        logging.info(f"Attempting to connect to Meshtastic via Serial: {mesh_port}")
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                if attempt > 1:
-                    logging.info(f"Retry attempt {attempt}/{MAX_RETRIES} for Serial connection...")
-                    time.sleep(RETRY_DELAY)
-                
-                # Attempt connection, disable node scan initially for faster startup
-                # Increase startup timeout if needed
-                mesh_interface = meshtastic.serial_interface.SerialInterface(mesh_port, noNodes=True, startTimeout=60)
-                # Wait briefly for the interface to establish connection and potentially get initial data
-                logging.debug("Waiting briefly for serial interface initialization...")
-                time.sleep(3) # Adjust if needed
-                if mesh_interface and mesh_interface.myNodeInfo:
-                     logging.info(f"Successfully connected via Serial to {mesh_port}. My Node: {mesh_interface.myNodeInfo.get('user',{}).get('id','?')}")
-                     connected = True
-                     break
-                else:
-                     logging.warning(f"Connected via Serial to {mesh_port}, but may not have received initial node info yet. Proceeding cautiously.")
-                     # Assume connection is okay for now, rely on pubsub for confirmation
-                     connected = True # Tentatively set true
-                     break
-
-            except Exception as e:
-                # Check if it's a Meshtastic-specific error (only if library is available)
-                if MESHTASTIC_AVAILABLE:
-                    try:
-                        from meshtastic import MeshtasticError
-                        if isinstance(e, MeshtasticError):
-                            logging.error(f"Meshtastic error connecting via Serial {mesh_port} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=False)
-                        else:
-                            logging.error(f"Generic error connecting via Serial {mesh_port} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
-                    except ImportError:
-                        logging.error(f"Generic error connecting via Serial {mesh_port} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
-                else:
-                    logging.error(f"Generic error connecting via Serial {mesh_port} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
-                
-                # Clean up failed connection attempt
-                # Note: mesh_interface is global, so check it directly, not via locals()
-                if mesh_interface:
-                    try:
-                        mesh_interface.close()
-                    except Exception:
-                        pass
-                    mesh_interface = None
-                
-                if attempt == MAX_RETRIES:
-                    logging.error(f"Failed to connect via Serial after {MAX_RETRIES} attempts.")
-
-    elif mesh_host:
-        logging.info(f"Attempting to connect to Meshtastic via TCP: {mesh_host}")
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                if attempt > 1:
-                    logging.info(f"Retry attempt {attempt}/{MAX_RETRIES} for TCP connection...")
-                    time.sleep(RETRY_DELAY)
-                
-                mesh_interface = meshtastic.tcp_interface.TCPInterface(mesh_host, noNodes=True)
-                logging.debug("Waiting briefly for TCP interface initialization...")
-                time.sleep(3) # Allow time for TCP connection and initial sync
-                if mesh_interface and mesh_interface.myNodeInfo:
-                    logging.info(f"Successfully connected via TCP to {mesh_host}. My Node: {mesh_interface.myNodeInfo.get('user',{}).get('id','?')}")
-                    connected = True
-                    break
-                else:
-                    logging.warning(f"Connected via TCP to {mesh_host}, but may not have received initial node info yet. Proceeding cautiously.")
-                    connected = True # Tentatively set true
-                    break
-
-            except Exception as e:
-                # Check if it's a Meshtastic-specific error (only if library is available)
-                if MESHTASTIC_AVAILABLE:
-                    try:
-                        from meshtastic import MeshtasticError
-                        if isinstance(e, MeshtasticError):
-                            logging.error(f"Meshtastic error connecting via TCP {mesh_host} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=False)
-                        else:
-                            logging.error(f"Generic error connecting via TCP {mesh_host} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
-                    except ImportError:
-                        logging.error(f"Generic error connecting via TCP {mesh_host} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
-                else:
-                    logging.error(f"Generic error connecting via TCP {mesh_host} (attempt {attempt}/{MAX_RETRIES}): {e}", exc_info=True)
-                
-                # Clean up failed connection attempt
-                # Note: mesh_interface is global, so check it directly, not via locals()
-                if mesh_interface:
-                    try:
-                        mesh_interface.close()
-                    except Exception:
-                        pass
-                    mesh_interface = None
-                
-                if attempt == MAX_RETRIES:
-                    logging.error(f"Failed to connect via TCP after {MAX_RETRIES} attempts.")
-
-    # --- Fallback to Mock ---
-    if not connected:
-        logging.warning("Failed to establish real Meshtastic connection. Falling back to Mock Interface.")
-        # Note: mesh_interface is global, so check it directly, not via locals()
-        if mesh_interface: # Close partially opened real interface if it exists
-             try:
-                 mesh_interface.close()
-             except Exception:
-                 pass # Ignore errors during close on fallback
-        mesh_interface = MockMeshtasticInterface()
-
-    return mesh_interface
-
-
-def setup_pubsub_listeners(server_instance: Any) -> None:
-    """
-    Sets up PyPubSub listeners for Meshtastic events if using the real interface.
-    Connects Meshtastic events (like receiving messages) to methods on the
-    IRC server instance.
-
-    Args:
-        server_instance: The instantiated MeshtasticGatewayServer object.
-    """
-    # Only set up listeners if pubsub is available and we are using the real interface
-    if pub and not isinstance(mesh_interface, MockMeshtasticInterface):
-        logging.info("Setting up Meshtastic pubsub listeners...")
+    description = f"serial device {mesh_port}" if mesh_port else f"TCP host {mesh_host}"
+    last_error: Exception | None = None
+    for attempt in range(1, config.MESH_CONNECT_RETRIES + 1):
+        interface = None
         try:
-            # Generic receive handler (catches text, position, ping, admin etc.)
-            pub.subscribe(server_instance.on_meshtastic_receive, "meshtastic.receive")
+            logging.info(
+                "Connecting to Meshtastic %s (attempt %d/%d)",
+                description,
+                attempt,
+                config.MESH_CONNECT_RETRIES,
+            )
+            if mesh_port:
+                interface = meshtastic.serial_interface.SerialInterface(
+                    devPath=mesh_port,
+                    noNodes=False,
+                    timeout=config.MESH_CONNECT_TIMEOUT,
+                )
+            else:
+                interface = meshtastic.tcp_interface.TCPInterface(
+                    hostname=mesh_host,
+                    noNodes=False,
+                    timeout=config.MESH_CONNECT_TIMEOUT,
+                )
+            logging.info("Connected to Meshtastic %s", description)
+            return interface
+        except Exception as exc:
+            last_error = exc
+            logging.warning("Meshtastic connection attempt %d failed: %s", attempt, exc)
+            if interface is not None:
+                try:
+                    interface.close()
+                except Exception:
+                    logging.debug("Failed interface cleanup", exc_info=True)
+            if attempt < config.MESH_CONNECT_RETRIES:
+                time.sleep(config.MESH_RETRY_DELAY)
+    raise RuntimeError(
+        f"could not connect to Meshtastic {description} after {config.MESH_CONNECT_RETRIES} attempts: {last_error}"
+    )
 
-            # Connection status handlers
-            pub.subscribe(on_mesh_connection_handler, "meshtastic.connection.status")
-            pub.subscribe(on_mesh_connection_handler, "meshtastic.connection.established")
-            pub.subscribe(on_mesh_connection_handler, "meshtastic.connection.lost")
-            # Node list update handler
-            pub.subscribe(on_node_update_handler, "meshtastic.node.updated")
 
-            logging.info("Pubsub listeners configured successfully.")
-        except Exception as e:
-            # Log errors during pubsub setup
-            logging.error(f"Failed to subscribe to pubsub topics: {e}", exc_info=True)
-    elif isinstance(mesh_interface, MockMeshtasticInterface):
-         # Mock interface uses its own direct callback mechanism
-         logging.info("Mock interface used, pubsub listeners not needed.")
-    else:
-         # Log if pubsub isn't available (shouldn't happen if meshtastic is installed)
-         logging.warning("Pubsub library not available, cannot set up Meshtastic listeners.")
+def load_and_register_commands(server: MeshtasticGatewayServer) -> None:
+    """Discover command modules and fail startup if any are invalid."""
+    import gateway.commands
 
-# --- PubSub Event Handlers (for real interface) ---
-
-def on_mesh_connection_handler(status: Optional[str] = None, interface: Any = None, **kwargs: Any) -> None:
-    """Handles Meshtastic connection status updates reported via pubsub."""
-    # Extract status message robustly
-    status_message = "Unknown connection status change"
-    if status:
-        status_message = str(status)
-    elif 'message' in kwargs:
-        status_message = str(kwargs['message'])
-    elif 'reason' in kwargs: # Sometimes connection lost provides a reason
-        status_message = f"Connection lost: {kwargs['reason']}"
-
-    logging.info(f"Meshtastic Connection Status: {status_message}")
-    # Notify IRC users about connection changes if the server is running
-    if irc_server and hasattr(irc_server, '_send_server_message_to_control_channel'):
-         irc_server._send_server_message_to_control_channel(f"Mesh Status: {status_message}", "[MESH]")
-
-def on_node_update_handler(node: Optional[dict] = None, interface: Any = None) -> None:
-    """Handles node list updates reported via pubsub."""
-    if node:
+    module_names = sorted(
+        module.name for module in pkgutil.iter_modules(gateway.commands.__path__) if module.name.startswith("cmd_")
+    )
+    if not module_names:
+        raise RuntimeError("no command modules were found")
+    for module_name in module_names:
+        full_name = f"gateway.commands.{module_name}"
+        module = importlib.import_module(full_name)
         try:
-            # Extract node info safely using .get() with defaults
-            node_id_num = node.get('num', 0) # Node number is often the primary key
-            if node_id_num == 0: return # Skip updates for invalid node number 0
-            user_info = node.get('user', {})
-            node_name = user_info.get('shortName') or user_info.get('longName') or f"Node-{node_id_num}"
-            last_heard_ts = node.get('lastHeard')
-            last_heard_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_heard_ts)) if last_heard_ts else 'Never'
-
-            logging.info(f"Node updated via pubsub: {node_name} ({node_id_num}), LastHeard: {last_heard_str}")
-
-            # Optionally announce node updates (can be noisy)
-            # if irc_server and hasattr(irc_server, '_send_server_message_to_control_channel'):
-            #    irc_server._send_server_message_to_control_channel(f"Node Update: {node_name} seen/updated.", "[MESH]")
-        except Exception as e:
-            logging.error(f"Error processing node update: {e} - Node data: {node}", exc_info=True)
-    else:
-        logging.warning("Received node update event with no node data.")
+            name = module.COMMAND_NAME
+            execute = module.execute
+            help_text = module.COMMAND_HELP
+        except AttributeError as exc:
+            raise RuntimeError(f"command module {full_name} is incomplete") from exc
+        server.register_command(name, execute, help_text)
+    logging.info("Registered %d commands: %s", len(server.commands), ", ".join(sorted(server.commands)))
 
 
-def load_and_register_commands(server_instance: Any) -> None:
-    """
-    Dynamically discovers and loads command modules from the 'commands' directory
-    and registers them with the provided IRC server instance.
-    """
-    commands_package = gateway.commands # Get the imported package object
-    # Determine the directory path of the commands package
-    commands_path = os.path.dirname(commands_package.__file__)
-    logging.info(f"Loading commands from directory: {commands_path}")
+def setup_pubsub_listeners(server: MeshtasticGatewayServer, interface: Any) -> list[tuple[Any, str]]:
+    """Subscribe the real interface to the Meshtastic event bus."""
+    if pub is None or isinstance(interface, MockMeshtasticInterface):
+        return []
 
-    # Iterate through files in the commands directory
-    for filename in os.listdir(commands_path):
-        # Look for Python files starting with 'cmd_'
-        if filename.startswith("cmd_") and filename.endswith(".py"):
-            module_name = filename[:-3] # Remove the '.py' extension
-            try:
-                # Construct the full, absolute module path (e.g., 'gateway.commands.cmd_send')
-                full_module_path = f"gateway.commands.{module_name}"
-                # Dynamically import the module
-                command_module = importlib.import_module(full_module_path)
-                logging.debug(f"Successfully loaded module: {full_module_path}")
+    def connection_established(interface: Any = None, topic: Any = None, **_: Any) -> None:
+        logging.info("Meshtastic connection established")
+        server._send_server_message_to_control_channel("Connection established", "[MESH]")
 
-                # Check if the module has the required attributes for a valid command
-                if hasattr(command_module, 'COMMAND_NAME') and \
-                   hasattr(command_module, 'execute') and \
-                   callable(command_module.execute) and \
-                   hasattr(command_module, 'COMMAND_HELP'):
+    def connection_lost(interface: Any = None, topic: Any = None, **kwargs: Any) -> None:
+        reason = kwargs.get("reason", "connection lost")
+        logging.warning("Meshtastic connection lost: %s", reason)
+        server.stop_after_mesh_failure(reason)
 
-                    # Extract command details from the module
-                    cmd_name = command_module.COMMAND_NAME
-                    cmd_func = command_module.execute
-                    cmd_help = command_module.COMMAND_HELP
-
-                    # Register the command with the IRC server instance
-                    server_instance.register_command(cmd_name, cmd_func, cmd_help)
-                else:
-                    # Log a warning if a potential command module is missing required parts
-                    logging.warning(f"Module {module_name} skipped: Missing required attributes (COMMAND_NAME, execute, COMMAND_HELP).")
-
-            except ImportError as e:
-                # Log errors specifically related to importing the module
-                logging.error(f"Failed to import command module {module_name}: {e}", exc_info=True)
-            except Exception as e:
-                # Log any other errors during loading or registration
-                logging.error(f"Error loading or registering command from {module_name}: {e}", exc_info=True)
+    subscriptions = [
+        (server.on_meshtastic_receive, "meshtastic.receive"),
+        (connection_established, "meshtastic.connection.established"),
+        (connection_lost, "meshtastic.connection.lost"),
+    ]
+    for listener, topic_name in subscriptions:
+        pub.subscribe(listener, topic_name)
+    return subscriptions
 
 
-def shutdown_handler(signum: int, frame: Any) -> None:
-    """Graceful shutdown handler for SIGINT (Ctrl+C) and SIGTERM."""
-    logging.warning(f"Received signal {signum}. Initiating graceful shutdown...")
-
-    # 1. Disconnect IRC clients
-    if irc_server:
-        logging.info("Disconnecting IRC clients...")
+def remove_pubsub_listeners(subscriptions: list[tuple[Any, str]]) -> None:
+    if pub is None:
+        return
+    for listener, topic_name in subscriptions:
         try:
-            # Use the server's method to disconnect all clients with a message
-            irc_server.disconnect_all("Server shutting down")
-        except Exception as e:
-            logging.error(f"Error disconnecting IRC clients: {e}")
+            pub.unsubscribe(listener, topic_name)
+        except Exception:
+            logging.debug("Could not unsubscribe from %s", topic_name, exc_info=True)
 
-    # 2. Close Meshtastic interface (if real and has close method)
-    if mesh_interface and not isinstance(mesh_interface, MockMeshtasticInterface):
-        if hasattr(mesh_interface, 'close') and callable(mesh_interface.close):
-             logging.info("Closing Meshtastic interface...")
-             try:
-                 mesh_interface.close()
-             except Exception as e:
-                 logging.error(f"Error closing Meshtastic interface: {e}")
-        # Unsubscribe from pubsub if available
-        if pub and hasattr(pub, 'unsubscribeAll'):
-            try:
-                pub.unsubscribeAll()
-                logging.debug("Unsubscribed from all pubsub topics")
-            except Exception as e:
-                logging.warning(f"Error unsubscribing from pubsub: {e}")
 
-    # 3. Exit the application
-    logging.info("Shutdown complete.")
-    sys.exit(0)
+def _is_loopback_bind(host: str) -> bool:
+    if host.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
-# --- Main Execution ---
-def main():
-    """
-    Main function: Parses arguments, sets up logging, initializes interfaces,
-    loads commands, starts the server, and handles shutdown.
-    """
-    global irc_server # Allow modification by signal handler
 
-    # --- Argument Parsing (Define args, defaults come from config) ---
+def build_ssl_context(certfile: str | None, keyfile: str | None) -> ssl.SSLContext | None:
+    if not certfile and not keyfile:
+        return None
+    if not certfile or not keyfile:
+        raise ValueError("both TLS certificate and key files are required")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certfile=certfile, keyfile=keyfile)
+    return context
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Akita Meshtastic IRC Gateway (AMIG)",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter # Show defaults in help
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # Use config values as defaults, but allow command-line override
-    parser.add_argument("-H", "--host", default=config.IRC_SERVER_HOST,
-                        help=f"Host address for IRC server to bind to")
-    parser.add_argument("-p", "--port", type=int, default=config.IRC_SERVER_PORT,
-                        help=f"Port for IRC server to listen on")
-    parser.add_argument("-n", "--servername", default=config.IRC_SERVER_NAME,
-                        help=f"Name reported by the IRC server")
-    parser.add_argument("--mesh-port", default=None, # Default to None, rely on config if not given
-                        help=f"Serial port for Meshtastic device (overrides config: {config.MESH_DEVICE_PORT})")
-    parser.add_argument("--mesh-host", default=None, # Default to None, rely on config if not given
-                        help=f"Hostname or IP for Meshtastic TCP/IP (overrides config: {config.MESH_DEVICE_HOST})")
-    parser.add_argument("--mesh-channel", type=int, default=config.DEFAULT_MESH_CHANNEL_INDEX,
-                        help=f"Default Meshtastic channel index used by SEND/ALARM")
-    parser.add_argument("--control-channel", default=config.CONTROL_CHANNEL,
-                        help=f"Name of the IRC control channel")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="Enable detailed DEBUG level logging (overrides config)")
+    parser.add_argument("-H", "--host", default=config.IRC_SERVER_HOST, help="IRC bind address")
+    parser.add_argument("-p", "--port", type=int, default=config.IRC_SERVER_PORT, help="IRC listen port")
+    parser.add_argument("-n", "--servername", default=config.IRC_SERVER_NAME, help="IRC server name")
+    connection = parser.add_mutually_exclusive_group()
+    connection.add_argument("--mesh-port", help="Meshtastic serial device (overrides environment)")
+    connection.add_argument("--mesh-host", help="Meshtastic TCP hostname (overrides environment)")
+    connection.add_argument("--mock", action="store_true", help="Use the in-memory test interface")
+    parser.add_argument(
+        "--mesh-channel", type=int, default=config.DEFAULT_MESH_CHANNEL_INDEX, help="Meshtastic channel index"
+    )
+    parser.add_argument("--control-channel", default=config.CONTROL_CHANNEL, help="IRC control channel")
+    parser.add_argument("--tls-cert", default=config.TLS_CERTFILE, help="PEM TLS certificate chain")
+    parser.add_argument("--tls-key", default=config.TLS_KEYFILE, help="PEM TLS private key")
+    parser.add_argument(
+        "--allow-insecure-irc",
+        action="store_true",
+        help="Permit a non-loopback IRC listener without TLS and password (unsafe)",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="enable debug logging")
+    args = parser.parse_args(argv)
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    if not 0 <= args.mesh_channel <= 7:
+        parser.error("--mesh-channel must be between 0 and 7")
+    if not args.control_channel.startswith("#"):
+        parser.error("--control-channel must start with '#'")
+    if not args.servername or any(character.isspace() for character in args.servername):
+        parser.error("--servername must be non-empty and contain no whitespace")
+    return args
 
-    args = parser.parse_args()
 
-    # --- Setup Logging ---
-    log_level = logging.DEBUG if args.verbose else config.LOG_LEVEL
-    setup_logging(log_level)
-    logging.debug(f"Command line arguments parsed: {args}")
+def _select_mesh_connection(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    if args.mock:
+        return None, None
+    if args.mesh_port:
+        return args.mesh_port, None
+    if args.mesh_host:
+        return None, args.mesh_host
+    return config.MESH_DEVICE_PORT, config.MESH_DEVICE_HOST
 
 
-    # --- Initialization ---
-    mesh_if = initialize_meshtastic_interface(args.mesh_port, args.mesh_host)
-    if mesh_if is None: # Check if initialization failed critically
-        logging.critical("Could not initialize any Meshtastic interface. Exiting.")
-        sys.exit(1)
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    setup_logging(logging.DEBUG if args.verbose else config.LOG_LEVEL)
+    ssl_context = build_ssl_context(args.tls_cert, args.tls_key)
+    if (
+        not _is_loopback_bind(args.host)
+        and not args.allow_insecure_irc
+        and (ssl_context is None or not config.IRC_PASSWORD)
+    ):
+        logging.error(
+            "Non-loopback IRC requires TLS and AMIG_IRC_PASSWORD; use --allow-insecure-irc only on a trusted network"
+        )
+        return 2
 
-    # Log effective settings
-    logging.info(f"Starting Akita Meshtastic IRC Gateway (AMIG) '{args.servername}' on {args.host}:{args.port}")
-    logging.info(f"Using Meshtastic Interface: {'Mock' if isinstance(mesh_if, MockMeshtasticInterface) else 'Real'}")
-    logging.info(f"IRC Control Channel: {args.control_channel}")
-    logging.info(f"Default Mesh Channel Index: {args.mesh_channel}")
-
-    # --- Server Setup and Start ---
+    mesh_port, mesh_host = _select_mesh_connection(args)
+    interface = None
+    server = None
+    subscriptions: list[tuple[Any, str]] = []
     try:
-        # Instantiate the IRC server, passing the mesh interface and relevant config args
-        irc_server = MeshtasticGatewayServer(
-            mesh_interface_ref=mesh_if,
+        interface = initialize_meshtastic_interface(mesh_port, mesh_host, args.mock)
+        server = MeshtasticGatewayServer(
+            mesh_interface_ref=interface,
             control_channel_name=args.control_channel,
             default_mesh_channel_index=args.mesh_channel,
             bind_address=(args.host, args.port),
-            servername=args.servername
+            servername=args.servername,
+            irc_password=config.IRC_PASSWORD,
+            ssl_context=ssl_context,
+            mesh_send_interval=config.MESH_SEND_INTERVAL,
+            max_clients=config.IRC_MAX_CLIENTS,
+            registration_timeout=config.IRC_REGISTRATION_TIMEOUT,
+            mesh_response_timeout=config.MESH_RESPONSE_TIMEOUT,
         )
+        load_and_register_commands(server)
+        subscriptions = setup_pubsub_listeners(server, interface)
 
-        # Load and register command modules found in the 'commands' directory
-        load_and_register_commands(irc_server)
+        def request_shutdown(signum: int, frame: Any) -> None:
+            del frame
+            logging.info("Received signal %s; shutting down", signum)
+            raise KeyboardInterrupt
 
-        # Setup pubsub listeners *after* server instance is created (for real interface)
-        setup_pubsub_listeners(irc_server)
-
-        # Setup signal handlers for graceful shutdown (Ctrl+C, kill)
-        signal.signal(signal.SIGINT, shutdown_handler)
-        signal.signal(signal.SIGTERM, shutdown_handler)
-
-        # Start the server's main processing loop (blocks until shutdown)
-        logging.info("Server starting. Press Ctrl+C to shut down gracefully.")
-        irc_server.serve_forever() # This blocks until interrupted
-
-    except OSError as e:
-        # Handle specific error if server can't bind to the address/port
-        logging.error(f"Failed to bind IRC server to {args.host}:{args.port} - {e}")
-        logging.error("Is the port already in use or do you have permissions?")
-        sys.exit(1)
+        signal.signal(signal.SIGINT, request_shutdown)
+        signal.signal(signal.SIGTERM, request_shutdown)
+        logging.info(
+            "AMIG listening on %s:%s (%s, %s mesh)",
+            args.host,
+            args.port,
+            "TLS" if ssl_context else "plain IRC",
+            "mock" if args.mock else "real",
+        )
+        server.serve_forever(poll_interval=0.25)
+        if server.runtime_failure:
+            raise RuntimeError(f"Meshtastic connection lost: {server.runtime_failure}")
     except KeyboardInterrupt:
-        # This might be caught if serve_forever doesn't handle SIGINT perfectly
-        logging.info("KeyboardInterrupt caught in main loop (should be handled by signal handler).")
-        # Ensure shutdown handler is called if loop exits this way
-        shutdown_handler(signal.SIGINT, None)
-    except Exception as e:
-        # Catch any other unexpected exceptions during server setup or runtime
-        logging.exception(f"An unexpected critical error occurred in the main loop: {e}")
-        sys.exit(1)
+        logging.info("Shutdown requested")
+    except (OSError, RuntimeError, ValueError):
+        logging.exception("Gateway startup or runtime failure")
+        return 1
+    finally:
+        remove_pubsub_listeners(subscriptions)
+        if server is not None:
+            server.disconnect_all()
+            server.server_close()
+        if interface is not None:
+            try:
+                interface.close()
+            except Exception:
+                logging.exception("Failed to close Meshtastic interface")
+    return 0
+
 
 if __name__ == "__main__":
-    # --- Pre-run Checks/Setup ---
-    # Ensure the commands directory and its __init__.py exist for dynamic loading
-    commands_dir = os.path.join(os.path.dirname(__file__), "commands")
-    os.makedirs(commands_dir, exist_ok=True) # Create dir if it doesn't exist
-    init_path = os.path.join(commands_dir, "__init__.py")
-    if not os.path.exists(init_path):
-        try:
-            # Create an empty __init__.py file to mark 'commands' as a package
-            with open(init_path, 'w') as f:
-                pass
-            logging.debug(f"Created empty {init_path}")
-        except OSError as e:
-            logging.warning(f"Could not create {init_path}: {e}")
-
-    # --- Execute Main Function ---
-    main()
+    raise SystemExit(main())
